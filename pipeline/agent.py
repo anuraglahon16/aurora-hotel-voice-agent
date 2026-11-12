@@ -56,8 +56,11 @@ Booking flow:
    phone or email.
 5. Before booking, summarize the selected room and ask for confirmation.
 6. After the caller confirms and required details are present, call create_booking.
-7. If the caller asks for a person or the request is outside what you can do,
-   call transfer_to_human. When the conversation is clearly over, call end_call."""
+7. After create_booking succeeds, read back the confirmation number and ask
+   whether the caller needs anything else. Do not end the call in that turn.
+8. If the caller asks for a person or the request is outside what you can do,
+   call transfer_to_human. Call end_call only after the caller says goodbye or
+   says they need nothing else. Never end the call on your own initiative."""
 
 # OpenAI-style tool schema (works on Groq too).
 TOOLS = [
@@ -171,7 +174,10 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "end_call",
-            "description": "End the call politely when the conversation is finished.",
+            "description": (
+                "End the call. Use only after the caller says goodbye or confirms "
+                "they need nothing else. Never call in the same turn as create_booking."
+            ),
             "parameters": {"type": "object", "properties": {}},
         },
     },
@@ -357,6 +363,7 @@ class Agent:
                 reason="hotel_knowledge_intent",
             )
         first_model_call = True
+        booked_this_turn = False
 
         while True:
             with trace.span("llm", model=getattr(self.provider, "llm_model", "unknown")):
@@ -447,8 +454,20 @@ class Agent:
                     elif tc.function.name == "search_hotel_knowledge":
                         with trace.span("retrieval", query=args.get("query", "")):
                             result = run_tool(tc.function.name, args)
+                    elif tc.function.name == "end_call" and booked_this_turn:
+                        # The caller has not heard the confirmation yet. Hanging
+                        # up here drops the call right after a booking.
+                        trace.event("control.end_call_rejected", reason="booking_just_created")
+                        result = {
+                            "result": (
+                                "Call not ended. Read back the confirmation number and "
+                                "ask whether the caller needs anything else."
+                            ),
+                        }
                     else:
                         result = run_tool(tc.function.name, args)
+                        if tc.function.name == "create_booking":
+                            booked_this_turn = True
                 trace.event(
                     "tool.result",
                     tool=tc.function.name,

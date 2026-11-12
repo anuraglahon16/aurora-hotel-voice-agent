@@ -11,7 +11,7 @@ os.environ.setdefault("TTS_BACKEND", "print")
 
 from agent import Agent, explicit_language_request, required_tool_for
 from knowledge import search_hotel_knowledge
-from providers import MockProvider, _env_or_default, _mk_tool, make_provider
+from providers import MockProvider, _env_or_default, _mk_text, _mk_tool, make_provider
 from router import AgentRouter
 from scale_check import estimate_capacity
 from telemetry import TurnTrace
@@ -65,6 +65,39 @@ class RouterTests(unittest.TestCase):
             "router.language_change_rejected",
             [event["name"] for event in trace.events],
         )
+
+
+class CallControlTests(unittest.TestCase):
+    def test_end_call_in_same_turn_as_booking_is_rejected(self):
+        # Reproduces a live Groq call: the model booked, then hung up before
+        # the caller heard the confirmation.
+        class EagerHangupProvider(MockProvider):
+            def chat(self, messages, tools=None, tool_choice=None):
+                last = messages[-1]
+                if last.get("role") == "user":
+                    return _mk_tool("create_booking", {
+                        "check_in": "2026-08-12", "check_out": "2026-08-14",
+                        "guests": 2, "room_type": "Deluxe King",
+                        "guest_name": "Test Guest", "contact": "test@example.com",
+                    })
+                if last.get("tool_call_id") == "call_create_booking":
+                    return _mk_tool("end_call", {})
+                return _mk_text("Your booking is confirmed. Anything else?")
+
+        agent = Agent(EagerHangupProvider())
+        trace = TurnTrace(session_id="test", turn_id="book")
+        _, action = agent.respond("Yes, please book it.", trace=trace)
+
+        self.assertIsNone(action)
+        self.assertIn(
+            "control.end_call_rejected",
+            [event["name"] for event in trace.events],
+        )
+
+    def test_end_call_after_goodbye_still_hangs_up(self):
+        agent = Agent(make_provider("mock"))
+        _, action = agent.respond("Goodbye", trace=TurnTrace(session_id="t", turn_id="bye"))
+        self.assertEqual(action, "hangup")
 
 
 class ProviderConfigurationTests(unittest.TestCase):

@@ -67,8 +67,12 @@ const tuning = {
   sensitivity: 3.2,
   minTurnMs: 500,
   speechConfirmationMs: 110,
-  bargeInConfirmationMs: 200,
-  bargeInArmMs: 450,
+  // Browser speech synthesis is not removed by WebRTC echo cancellation, so
+  // Aurora's own voice through laptop speakers can look like a caller. Learn
+  // the echo level for longer and require sustained speech above it.
+  bargeInConfirmationMs: 450,
+  bargeInArmMs: 900,
+  bargeInEchoMultiplier: 2.6,
   maxTurnMs: 20000,
 };
 
@@ -286,7 +290,10 @@ function thresholds() {
   return {
     start,
     end: Math.max(0.008, start * 0.58),
-    barge: Math.min(0.12, Math.max(0.024, start * 1.55, playbackEchoFloor * 1.8)),
+    barge: Math.min(
+      0.2,
+      Math.max(0.03, start * 1.55, playbackEchoFloor * tuning.bargeInEchoMultiplier),
+    ),
   };
 }
 
@@ -413,7 +420,11 @@ function vadLoop() {
   if (agentSpeaking && !muted) {
     const playbackAge = now - playbackStartedAt;
     if (playbackAge < tuning.bargeInArmMs) {
-      playbackEchoFloor = (playbackEchoFloor * 0.88) + (smoothedLevel * 0.12);
+      // Track the louder parts of Aurora's voice, not just the quiet onset.
+      playbackEchoFloor = Math.max(
+        playbackEchoFloor * 0.97,
+        (playbackEchoFloor * 0.88) + (smoothedLevel * 0.12),
+      );
       bargeCandidateAt = 0;
     } else if (smoothedLevel > limit.barge) {
       if (!bargeCandidateAt) {
@@ -436,7 +447,10 @@ function vadLoop() {
         bargeRecordingCandidate = false;
       }
       bargeCandidateAt = 0;
-      playbackEchoFloor = (playbackEchoFloor * 0.995) + (smoothedLevel * 0.005);
+      // Keep learning while Aurora speaks; rise quickly, decay slowly.
+      playbackEchoFloor = smoothedLevel > playbackEchoFloor
+        ? (playbackEchoFloor * 0.9) + (smoothedLevel * 0.1)
+        : (playbackEchoFloor * 0.995) + (smoothedLevel * 0.005);
     }
   } else if (!agentBusy && !muted && now > listenCooldownUntil) {
     if (!recorder) {
